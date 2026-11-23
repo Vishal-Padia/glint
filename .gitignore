@@ -224,3 +224,6 @@ __marimo__/
 
 # plan
 plan.md
+
+# Modal run logs (kept locally)
+logs/
