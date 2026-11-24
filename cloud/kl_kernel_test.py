@@ -76,6 +76,31 @@ def check():
     assert ok, "kl mismatch"
     log("PASS 2 OK")
 
+    # Wrapper: real Qwen2.5 shapes (student 1.5B, teacher 7B), N not a multiple of the chunk size.
+    from glint.kl_kernel import reverse_kl_chunked
+
+    N, D_S, D_T, V_S, V_T, CHUNK = 3000, 1536, 3584, 151_936, 152_064, 1024
+    h_s = torch.randn(N, D_S, device="cuda").bfloat16()
+    h_t = torch.randn(N, D_T, device="cuda").bfloat16()
+    w_s = (torch.randn(V_S, D_S, device="cuda") * 3 / D_S**0.5).bfloat16()  # logit std ~3
+    w_t = (torch.randn(V_T, D_T, device="cuda") * 3 / D_T**0.5).bfloat16()
+
+    log(f"wrapper: N={N} in chunks of {CHUNK}, student [{V_S}, {D_S}], teacher [{V_T}, {D_T}]")
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    kl_w = reverse_kl_chunked(h_s, w_s, h_t, w_t, V=V, chunk_rows=CHUNK)
+    torch.cuda.synchronize()
+    log(f"wrapper peak extra memory {(torch.cuda.max_memory_allocated() - base) / 2**20:.0f} MiB")
+
+    # Reference from the full bf16 logits. Chunked and full matmuls may round a few logits
+    # differently, so the bar is relative 1e-3: broken plumbing (strides, tail chunk) is O(1) off.
+    ref = reverse_kl((h_s @ w_s.T)[:, :V], (h_t @ w_t.T)[:, :V])
+    rel = ((kl_w.double() - ref).abs() / ref.abs()).max().item()
+    log(f"wrapper kl[0] {kl_w[0].item():.6f}  ref {ref[0].item():.6f}  kl[-1] {kl_w[-1].item():.6f}  ref {ref[-1].item():.6f}")
+    log(f"wrapper max rel err {rel:.2e}")
+    assert rel < 1e-3, "wrapper mismatch"
+    log("WRAPPER OK")
+
 
 @app.local_entrypoint()
 def main():

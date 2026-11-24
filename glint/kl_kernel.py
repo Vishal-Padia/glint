@@ -1,4 +1,6 @@
+import torch
 import triton
+
 import triton.language as tl
 
 @triton.jit
@@ -53,3 +55,37 @@ def kl_kernel(
 
     kl = acc + (lse_t - lse_s)
     tl.store(kl_ptr + row, kl)
+
+def reverse_kl_chunked(h_s, w_s, h_t, w_t, V=151_665, chunk_rows=1024, BLOCK_V=4096):
+    """
+    h_s [N, d_s],
+    w_s [V_s, d_s],
+    h_t [N, d_t],
+    w_t [V_t, d_t]  ->  kl [N] fp32
+    """
+    assert h_s.shape[0] == h_t.shape[0], "student/teacher row counts differ"
+    assert V <= w_s.shape[0] and V <= w_t.shape[0], "V exceeds a padded vocab"
+    assert h_s.shape[1] == w_s.shape[1]
+    assert h_t.shape[1] == w_t.shape[1]
+    assert h_s.is_cuda and h_t.is_cuda
+
+    N = h_s.shape[0]
+    kl = torch.empty(N, dtype=torch.float32, device=h_s.device)
+    lse_s = torch.empty_like(kl)
+    lse_t = torch.empty_like(kl)
+
+    for i in range(0, N, chunk_rows):
+        j = min(i + chunk_rows, N)
+        n = j - i
+        s = h_s[i:j] @ w_s.T
+        t = h_t[i:j] @ w_t.T
+
+        # launch kernel
+        kl_kernel[(n,)](
+            s, t, kl[i:j], lse_s[i:j], lse_t[i:j],
+            s.stride(0), t.stride(0),
+            V, BLOCK_V=BLOCK_V
+        )
+        del s, t
+
+    return kl
