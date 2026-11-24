@@ -13,4 +13,5 @@ dependencies = [
 [dependency-groups]
 dev = [
     "modal>=1.6.4",
+    "python-dotenv>=1.2.4",
 ]

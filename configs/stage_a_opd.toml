@@ -1,0 +1,61 @@
+# Stage A: prime-rl's stock opd. Qwen2.5-1.5B student, one frozen Qwen2.5-7B teacher.
+# Launched by cloud/stage_a_opd.py, which starts the teacher on port 8001 first.
+
+max_steps = 20
+seq_len = 2048
+
+[model]
+name = "Qwen/Qwen2.5-1.5B-Instruct"
+
+[monitors.wandb]
+project = "glint"
+name = "stage-a-opd"
+
+[orchestrator]
+batch_size = 128
+
+[orchestrator.train]
+group_size = 16
+
+[orchestrator.train.algo]
+type = "opd"
+
+[orchestrator.train.algo.teacher]
+name = "Qwen/Qwen2.5-7B-Instruct"
+base_url = "http://localhost:8001/v1"
+
+# No Qwen2.5 renderer in prime-rl: use the model's own chat template.
+[orchestrator.renderer]
+name = "default"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 128
+
+[[orchestrator.train.source]]
+name = "reverse-text"
+env.taskset.id = "reverse-text"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"
+
+[orchestrator.eval]
+interval = 5
+
+[orchestrator.eval.select]
+limit = 128
+
+[orchestrator.eval.sampling]
+max_completion_tokens = 128
+
+[[orchestrator.eval.source]]
+name = "reverse-text"
+env.taskset.id = "reverse-text"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"
+
+[trainer.optim]
+lr = 3e-6
+
+[inference]
+
+[inference.vllm]
+gpu_memory_utilization = 0.5
