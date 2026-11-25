@@ -1,9 +1,3 @@
-"""Check the reverse-KL Triton kernel on a Modal GPU (Triton has no macOS wheels).
-
-Run from the glint repo root, in the capstan workspace:
-    MODAL_PROFILE=capstan uv run modal run cloud/kl_kernel_test.py > logs/kl_kernel_fwd.log 2>&1
-"""
-
 import time
 from pathlib import Path
 

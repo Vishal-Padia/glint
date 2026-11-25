@@ -1,9 +1,3 @@
-"""Check the prime-rl Qwen2 patch on a Modal GPU.
-
-Run from the glint repo root, in the capstan workspace:
-    MODAL_PROFILE=capstan uv run modal run cloud/qwen2_parity.py > logs/qwen2_parity.log 2>&1
-"""
-
 import os
 import subprocess
 import time

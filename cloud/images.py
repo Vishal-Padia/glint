@@ -1,5 +1,3 @@
-"""Modal image with the prime-rl fork installed (shared by the cloud/ jobs)."""
-
 from pathlib import Path
 
 import modal

@@ -1,8 +1,3 @@
-"""Real-weights parity: HF Qwen2.5-0.5B-Instruct vs prime-rl's patched Qwen2 model.
-
-Runs inside prime-rl's venv on a GPU (see cloud/qwen2_parity.py).
-"""
-
 import time
 
 import torch
