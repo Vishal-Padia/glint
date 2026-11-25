@@ -26,7 +26,7 @@ def check():
     import torch
     import triton
 
-    from glint.kl_kernel import kl_kernel
+    from glint.kl_kernel import kl_fwd_kernel
 
     log(f"GPU: {torch.cuda.get_device_name()}, torch {torch.__version__}, triton {triton.__version__}")
 
@@ -43,7 +43,7 @@ def check():
     lse_t = torch.empty_like(kl)
 
     log(f"pass 1: N={N}, V={V} (row stride {V_PADDED}), BLOCK_V={BLOCK_V}, {triton.cdiv(V, BLOCK_V)} tiles per row")
-    kl_kernel[(N,)](s, t, kl, lse_s, lse_t, s.stride(0), t.stride(0), V, BLOCK_V=BLOCK_V)
+    kl_fwd_kernel[(N,)](s, t, kl, lse_s, lse_t, s.stride(0), t.stride(0), V, BLOCK_V=BLOCK_V)
     torch.cuda.synchronize()
 
     ref_s = torch.logsumexp(s[:, :V].double(), dim=-1)
@@ -68,7 +68,7 @@ def check():
     }
     ok = True
     for name, (cs, ct) in cases.items():
-        kl_kernel[(N,)](cs, ct, kl, lse_s, lse_t, cs.stride(0), ct.stride(0), V, BLOCK_V=BLOCK_V)
+        kl_fwd_kernel[(N,)](cs, ct, kl, lse_s, lse_t, cs.stride(0), ct.stride(0), V, BLOCK_V=BLOCK_V)
         ref = reverse_kl(cs[:, :V], ct[:, :V])
         err = (kl.double() - ref).abs().max().item()
         log(f"{name:20s} kl {kl[0].item():.6e}  ref {ref[0].item():.6e}  max abs err {err:.2e}")
@@ -100,6 +100,45 @@ def check():
     log(f"wrapper max rel err {rel:.2e}")
     assert rel < 1e-3, "wrapper mismatch"
     log("WRAPPER OK")
+
+    # Backward, loss = sum_i g_i * K_i. Three comparisons, to separate bugs from bf16 rounding.
+    from glint.kl_kernel import kl_bwd_kernel, reverse_kl_bwd_chunked
+
+    def rel_err(a, b):  # ||a - b|| / ||b||
+        return ((a.double() - b).norm() / b.norm()).item()
+
+    N_B, CHUNK_B = 300, 128  # small N keeps the float64 reference cheap; 3 chunks, last one partial
+    hs, ht = h_s[:N_B].contiguous(), h_t[:N_B].contiguous()
+    g = torch.rand(N_B, device="cuda")
+    s_b, t_b = hs @ w_s.T, ht @ w_t.T  # bf16 logits, shared by the kernel and the reference below
+    kl_b, lse_s_b, lse_t_b = (torch.empty(N_B, device="cuda") for _ in range(3))
+    kl_fwd_kernel[(N_B,)](s_b, t_b, kl_b, lse_s_b, lse_t_b, s_b.stride(0), t_b.stride(0), V, BLOCK_V=BLOCK_V)
+
+    # Reference dL/ds: float64 autograd starting from the same bf16 logits.
+    s64 = s_b.double().requires_grad_()
+    (reverse_kl(s64[:, :V], t_b.double()[:, :V]) * g.double()).sum().backward()
+
+    # 1. Kernel alone: only error source is storing grad_s in bf16.
+    grad_s = torch.zeros_like(s_b)
+    kl_bwd_kernel[(N_B,)](s_b, t_b, lse_s_b, lse_t_b, kl_b, g, grad_s,
+                          s_b.stride(0), t_b.stride(0), grad_s.stride(0), V, BLOCK_V=BLOCK_V)
+    e_s, pad_s = rel_err(grad_s, s64.grad), grad_s[:, V:].abs().max().item()
+    log(f"backward kernel   grad_s   rel err {e_s:.2e}, max |padding cols| {pad_s:.1e}")
+
+    # 2. Wrapper vs the same-logits reference pushed through the matmuls in float64.
+    grad_h, grad_w = reverse_kl_bwd_chunked(hs, w_s, ht, w_t, lse_s_b, lse_t_b, kl_b, g, V=V, chunk_rows=CHUNK_B)
+    e_h = rel_err(grad_h, s64.grad @ w_s.double())
+    e_w = rel_err(grad_w, s64.grad.T @ hs.double())
+    pad_w = grad_w[V:].abs().max().item()
+    log(f"backward wrapper  grad_h_s rel err {e_h:.2e}, grad_w_s rel err {e_w:.2e}, max |padding rows| {pad_w:.1e}")
+
+    # 3. Info only: vs logits computed in float64 from h and w, i.e. what bf16 logits cost.
+    hs64, ws64 = hs.double().requires_grad_(), w_s.double().requires_grad_()
+    (reverse_kl((hs64 @ ws64.T)[:, :V], (ht.double() @ w_t.double().T)[:, :V]) * g.double()).sum().backward()
+    log(f"vs float64 logits grad_h_s rel err {rel_err(grad_h, hs64.grad):.2e}, grad_w_s rel err {rel_err(grad_w, ws64.grad):.2e}")
+
+    assert e_s < 1e-2 and e_h < 1e-2 and e_w < 1e-2 and pad_s == 0 and pad_w == 0, "backward mismatch"
+    log("BACKWARD OK")
 
 
 @app.local_entrypoint()
