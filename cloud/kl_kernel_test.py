@@ -145,7 +145,11 @@ def check():
         return h.grad, w.grad
 
     gh, gw = fused_grads(lambda k: (k * g).sum())
-    same = torch.equal(gh, grad_h) and torch.equal(gw, grad_w)
+    # Same path by hand: the forward wrapper (not the direct kernel call above, whose launch
+    # settings differ and so round the reductions differently), then the backward wrapper.
+    kl_r, lse_s_r, lse_t_r = reverse_kl_chunked(hs, w_s, ht, w_t, V=V, chunk_rows=CHUNK_B)
+    gh_r, gw_r = reverse_kl_bwd_chunked(hs, w_s, ht, w_t, lse_s_r, lse_t_r, kl_r, g, V=V, chunk_rows=CHUNK_B)
+    same = torch.equal(gh, gh_r) and torch.equal(gw, gw_r)
     log(f"autograd (kl * g).sum(): grads identical to the wrapper's: {same}")
 
     s64m = s_b.double().requires_grad_()

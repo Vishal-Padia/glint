@@ -21,8 +21,8 @@ def kl_fwd_kernel(
     m_t = tl.full([], NEG_INF, tl.float32)
     d_s = tl.zeros([], tl.float32)
     d_t = tl.zeros([], tl.float32)
+    acc = tl.zeros([], tl.float32)
 
-    # pass 1
     for start in range(0, V, BLOCK_V):
         offs = start + cols
         mask = offs < V
@@ -30,8 +30,11 @@ def kl_fwd_kernel(
         t = tl.load(t_row + offs, mask=mask, other=NEG_INF).to(tl.float32)
 
         m_s_new = tl.maximum(m_s, tl.max(s, axis=0))
-        d_s = d_s * tl.exp(m_s - m_s_new) + tl.sum(tl.exp(s - m_s_new), axis=0)
-        m_s = m_s_new
+        alpha = tl.exp(m_s - m_s_new)
+        e = tl.exp(s - m_s_new)
+        d_s = d_s * alpha + tl.sum(e, axis=0)
+        acc = acc * alpha + tl.sum(tl.where(mask, e * (s - t), 0.0), axis=0)
+        m_s = m_s_new # last, after alpha is used
 
         m_t_new = tl.maximum(m_t, tl.max(t, axis=0))
         d_t = d_t * tl.exp(m_t - m_t_new) + tl.sum(tl.exp(t - m_t_new), axis=0)
@@ -39,21 +42,9 @@ def kl_fwd_kernel(
 
     lse_s = m_s + tl.log(d_s)
     lse_t = m_t + tl.log(d_t)
+    kl = acc / d_s + lse_t - lse_s
     tl.store(lse_s_ptr + row, lse_s)
     tl.store(lse_t_ptr + row, lse_t)
-
-    # pass 2
-    acc = tl.zeros([], tl.float32)
-    for start in range(0, V, BLOCK_V):
-        offs = start + cols
-        mask = offs < V
-        s = tl.load(s_row + offs, mask=mask, other=0.0).to(tl.float32)
-        t = tl.load(t_row + offs, mask=mask, other=0.0).to(tl.float32)
-
-        p = tl.exp(s - lse_s)
-        acc += tl.sum(tl.where(mask, p * (s - t), 0), axis=0)
-
-    kl = acc + (lse_t - lse_s)
     tl.store(kl_ptr + row, kl)
 
 def reverse_kl_chunked(h_s, w_s, h_t, w_t, V=151_665, chunk_rows=1024, BLOCK_V=4096):
@@ -84,7 +75,7 @@ def reverse_kl_chunked(h_s, w_s, h_t, w_t, V=151_665, chunk_rows=1024, BLOCK_V=4
         kl_fwd_kernel[(n,)](
             s, t, kl[i:j], lse_s[i:j], lse_t[i:j],
             s.stride(0), t.stride(0),
-            V, BLOCK_V=BLOCK_V
+            V, BLOCK_V=BLOCK_V, num_warps=8,  # tuned on H100, see cloud/kl_tune.py
         )
         del s, t
 
@@ -130,7 +121,7 @@ def kl_bwd_kernel(
         )
 
 def reverse_kl_bwd_chunked(h_s, w_s, h_t, w_t, lse_s, lse_t, kl, g,
-                           V=151_665, chunk_rows=1024, BLOCK_V=4096):
+                           V=151_665, chunk_rows=1024, BLOCK_V=1024):
     N = h_s.shape[0]
     grad_h_s = torch.empty_like(h_s)
     grad_w_s = torch.zeros_like(w_s, dtype=torch.float32) # accumulate in fp32
@@ -145,7 +136,7 @@ def reverse_kl_bwd_chunked(h_s, w_s, h_t, w_t, lse_s, lse_t, kl, g,
         kl_bwd_kernel[(n,)](
             s, t, lse_s[i:j], lse_t[i:j], kl[i:j], g[i:j], grad_s,
             s.stride(0), t.stride(0), grad_s.stride(0),
-            V, BLOCK_V=BLOCK_V,
+            V, BLOCK_V=BLOCK_V, num_warps=16,  # tuned on H100, see cloud/kl_tune.py
         )
 
         grad_h_s[i:j] = grad_s @ w_s
