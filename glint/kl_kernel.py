@@ -149,7 +149,7 @@ def reverse_kl_bwd_chunked(h_s, w_s, h_t, w_t, lse_s, lse_t, kl, g,
         )
 
         grad_h_s[i:j] = grad_s @ w_s
-        grad_w_s += (grad_s.T @ h_s[i:j]).float()
+        grad_w_s = torch.addmm(grad_w_s, grad_s.T, h_s[i:j], out=grad_w_s, out_dtype=torch.float32)
         del s, t, grad_s
 
     return grad_h_s, grad_w_s.to(w_s.dtype)
