@@ -88,7 +88,7 @@ def reverse_kl_chunked(h_s, w_s, h_t, w_t, V=151_665, chunk_rows=1024, BLOCK_V=4
         )
         del s, t
 
-    return kl
+    return kl, lse_s, lse_t
 
 @triton.jit
 def kl_bwd_kernel(
@@ -153,3 +153,29 @@ def reverse_kl_bwd_chunked(h_s, w_s, h_t, w_t, lse_s, lse_t, kl, g,
         del s, t, grad_s
 
     return grad_h_s, grad_w_s.to(w_s.dtype)
+
+class ReverseKL(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, h_s, w_s, h_t, w_t, V, chunk_rows):
+        kl, lse_s, lse_t = reverse_kl_chunked(
+            h_s, w_s, h_t, w_t, V=V, chunk_rows=chunk_rows
+        ) # run forward wrapper
+        ctx.save_for_backward(kl, lse_s, lse_t, h_s, w_s, h_t, w_t) # whatever backward needs
+        ctx.V, ctx.chunk_rows = V, chunk_rows # non-tensors go on ctx directly
+        return kl
+
+    @staticmethod
+    def backward(ctx, g): # g = dL/dK, shape [N]
+        g = g.contiguous()
+        kl, lse_s, lse_t, h_s, w_s, h_t, w_t = ctx.saved_tensors
+        grad_h_s, grad_w_s = reverse_kl_bwd_chunked(
+            h_s, w_s,
+            h_t, w_t,
+            lse_s, lse_t, kl,
+            g,
+            V=ctx.V, chunk_rows=ctx.chunk_rows
+        )
+        return grad_h_s, grad_w_s, None, None, None, None # one per forward input
+
+def reverse_kl_fused(h_s, w_s, h_t, w_t, V=151_665, chunk_rows=1024):
+    return ReverseKL.apply(h_s, w_s, h_t, w_t, V, chunk_rows)

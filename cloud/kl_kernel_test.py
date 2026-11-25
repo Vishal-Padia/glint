@@ -88,7 +88,7 @@ def check():
     log(f"wrapper: N={N} in chunks of {CHUNK}, student [{V_S}, {D_S}], teacher [{V_T}, {D_T}]")
     torch.cuda.reset_peak_memory_stats()
     base = torch.cuda.memory_allocated()
-    kl_w = reverse_kl_chunked(h_s, w_s, h_t, w_t, V=V, chunk_rows=CHUNK)
+    kl_w, _, _ = reverse_kl_chunked(h_s, w_s, h_t, w_t, V=V, chunk_rows=CHUNK)
     torch.cuda.synchronize()
     log(f"wrapper peak extra memory {(torch.cuda.max_memory_allocated() - base) / 2**20:.0f} MiB")
 
@@ -139,6 +139,29 @@ def check():
 
     assert e_s < 1e-2 and e_h < 1e-2 and e_w < 1e-2 and pad_s == 0 and pad_w == 0, "backward mismatch"
     log("BACKWARD OK")
+
+    # Autograd: the Function must reproduce the wrapper's grads, including when g comes from
+    # kl.mean() (autograd then passes a stride-0 expanded tensor, not N real values).
+    from glint.kl_kernel import reverse_kl_fused
+
+    def fused_grads(loss_fn):
+        h = hs.clone().requires_grad_()
+        w = w_s.clone().requires_grad_()
+        loss_fn(reverse_kl_fused(h, w, ht, w_t, V=V, chunk_rows=CHUNK_B)).backward()
+        return h.grad, w.grad
+
+    gh, gw = fused_grads(lambda k: (k * g).sum())
+    same = torch.equal(gh, grad_h) and torch.equal(gw, grad_w)
+    log(f"autograd (kl * g).sum(): grads identical to the wrapper's: {same}")
+
+    s64m = s_b.double().requires_grad_()
+    reverse_kl(s64m[:, :V], t_b.double()[:, :V]).mean().backward()
+    gh_m, gw_m = fused_grads(lambda k: k.mean())
+    e_hm = rel_err(gh_m, s64m.grad @ w_s.double())
+    e_wm = rel_err(gw_m, s64m.grad.T @ hs.double())
+    log(f"autograd kl.mean(): grad_h_s rel err {e_hm:.2e}, grad_w_s rel err {e_wm:.2e}")
+    assert same and e_hm < 1e-2 and e_wm < 1e-2, "autograd mismatch"
+    log("AUTOGRAD OK")
 
 
 @app.local_entrypoint()
